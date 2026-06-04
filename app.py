@@ -4,12 +4,41 @@ import numpy as np
 import os
 import base64  
 from datetime import datetime  
+import urllib.parse 
 
-# 1. واجهة البرنامج (ممركزة في الوسط وبدون عنوان فرعي)
-st.markdown("<h1 style='text-align: center;'>نظام رصد الأطفال المفقودين</h1>", unsafe_allow_html=True)
+# 1. إعداد الصفحة
+st.set_page_config(layout="wide")
+
+# تنسيق CSS للمحاذاة من اليمين لليسار، وتوسيط العنوان بالكامل
+st.markdown("""
+    <style>
+    body, .stApp, p, div, label {
+        direction: rtl !important;
+        text-align: right !important;
+    }
+    .main-title {
+        text-align: center !important;
+        font-size: 32px !important;
+        font-weight: bold !important;
+        margin-bottom: 20px;
+    }
+    .report-box {
+        padding: 15px; 
+        border-radius: 6px; 
+        margin-bottom: 15px;
+        border-right: 5px solid #166534;
+        background-color: #f0fdf4;
+        color: #166534;
+        font-size: 18px;
+    }
+    </style>
+""", unsafe_allow_html=True)
+
+# العنوان الرئيسي ممركز تماماً في المنتصف
+st.markdown('<div class="main-title">نظام رصد الأطفال المفقودين الذكي</div>', unsafe_allow_html=True)
 st.write("") 
 
-# دالة ذكية لتشغيل الصوت تلقائياً داخل المتصفح
+# دالة تشغيل صوت الإنذار
 def play_alarm_sound(sound_file):
     if os.path.exists(sound_file):
         with open(sound_file, "rb") as f:
@@ -22,14 +51,13 @@ def play_alarm_sound(sound_file):
                 """
             st.markdown(audio_html, unsafe_allow_html=True)
 
-# 2. استدعاء أدوات الذكاء الاصطناعي الأساسية
+# 2. استدعاء وتهيئة خوارزميات الذكاء الاصطناعي
 face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
 recognizer = cv2.face.LBPHFaceRecognizer_create()
 
 faces_data = []
 labels_data = []
 
-# دالة قراءة الصور المحدثة
 def load_folder_images(folder_name, label_id):
     if os.path.exists(folder_name):
         for file in os.listdir(folder_name):
@@ -43,90 +71,119 @@ def load_folder_images(folder_name, label_id):
                         faces_data.append(gray_img[y:y+h, x:x+w])
                         labels_data.append(label_id)
 
-# 3. مرحلة تدريب نموذج تعلم الآلة (التعديل هنا لمنع ظهور None)
-if os.path.exists("target"):
-    load_folder_images("target", 1)
-else:
-    load_folder_images("Target", 1)
+# تحميل صور المستهدف والأشخاص الآخرين
+if os.path.exists("target"): load_folder_images("target", 1)
+else: load_folder_images("Target", 1)
 
-if os.path.exists("others"):
-    load_folder_images("others", 2)
-else:
-    load_folder_images("Others", 2)
+if os.path.exists("others"): load_folder_images("others", 2)
+else: load_folder_images("Others", 2)
 
 model_ready = False
 if len(labels_data) > 0 and (1 in labels_data) and (2 in labels_data):
     recognizer.train(faces_data, np.array(labels_data))
     model_ready = True
-    st.markdown("<div style='text-align: center; color: #155724; background-color: #d4edda; border-color: #c3e6cb; padding: 10px; border-radius: 5px; margin-bottom: 20px;'>✅ تم تدريب النظام على تمييز المستهدف ضد الآخرين</div>", unsafe_allow_html=True)
-else:
-    st.markdown("<div style='text-align: center; color: #856404; background-color: #fff3cd; padding: 10px; border-radius: 5px; margin-bottom: 20px;'>⚠️ تأكدي من وجود مجلد target ومجلد others وبداخلهما صور واضحة للوجوه</div>", unsafe_allow_html=True)
 
-# 4. تشغيل كاميرا البث المباشر والمحاكاة
+# 3. إدارة ذاكرة الحالة (Session State) لمنع اختفاء البيانات
+if "is_target_found" not in st.session_state: st.session_state.is_target_found = False
+if "saved_frame" not in st.session_state: st.session_state.saved_frame = None
+if "saved_time" not in st.session_state: st.session_state.saved_time = ""
+if "saved_date" not in st.session_state: st.session_state.saved_date = ""
+
+# القائمة الجانبية لتسجيل رقم الهاتف
+st.sidebar.markdown("### ⚙️ الاتصال الرقمي")
+parent_phone = st.sidebar.text_input("رقم هاتف ولي الأمر (مثال: 9665xxxxxxxx):", value="966500000000")
+
+# 4. واجهة التحكم وبث الكاميرا
 check_col1, check_col2, check_col3 = st.columns([1.3, 1, 1])
 with check_col2:
-    run_camera = st.checkbox("تفعيل كاميرا المراقبة")
+    run_camera = st.checkbox("تفعيل كاميرا المراقبة", value=not st.session_state.is_target_found, disabled=st.session_state.is_target_found)
 
 video_col1, video_col2, video_col3 = st.columns([1, 3, 1])
 with video_col2:
-    FRAME_WINDOW = st.image([])
+    if st.session_state.is_target_found and st.session_state.saved_frame is not None:
+        st.image(st.session_state.saved_frame)
+    else:
+        FRAME_WINDOW = st.image([])
 
-alert_area = st.empty()
-sms_area = st.empty()
-
-if run_camera and model_ready:
+# تشغيل بث الكاميرا وفحص الوجوه
+if run_camera and model_ready and not st.session_state.is_target_found:
     camera = cv2.VideoCapture(0)
-    
     while run_camera:
         success, frame = camera.read()
-        if not success:
-            break
-            
+        if not success: break
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         faces = face_cascade.detectMultiScale(gray, 1.3, 5)
         frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         
-        child_spotted = False
-        
         for (x, y, w, h) in faces:
-            box_color = (255, 0, 0) 
-            text_label = "Unknown"
-            
             label, confidence = recognizer.predict(gray[y:y+h, x:x+w])
             
-            if label == 1 and confidence < 95:
-                box_color = (0, 255, 0) 
-                text_label = "MATCHED"
-                child_spotted = True
-            
-            cv2.rectangle(frame, (x, y), (x+w, y+h), box_color, 2)
-            cv2.putText(frame, text_label, (x, y-10), cv2.FONT_HERSHEY_SIMPLEX, 0.8, box_color, 2)
-            
-        FRAME_WINDOW.image(frame)
-        
-        if child_spotted:
-            play_alarm_sound("alarm.mp3")  
-            
-            now = datetime.now()
-            current_time = now.strftime("%I:%M:%S %p")
-            current_date = now.strftime("%Y-%m-%d")
-            
-            sms_text = f"""
-            📥 **الرسالة النصية الصادرة (SMS):**
-            
-            "عزيزي ولي الأمر، تم رصد طفلكم المفقود وهو بصحة جيدة.
-            🗓️ التاريخ: {current_date}
-            ⏱️ وقت الرصد الدقيق: {current_time}
-            📍 الموقع الجغرافي: بوابة المراقبة رقم 4"
-            """
-            
-            with alert_area.container():
-                st.error("🚨 [إنذار أمني]: تم رصد وتطابق الطفل المفقود المستهدف!")
+            # 🌟 تم إعادتها إلى 60 بناءً على طلبك لالتقاط الطفلة بنجاح
+            if label == 1 and confidence < 60:
+                cv2.rectangle(frame, (x, y), (x+w, y+h), (0, 255, 0), 2)
+                cv2.putText(frame, "MATCHED", (x, y-10), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
                 
-            with sms_area.container():
-                st.info(sms_text)  
-        else:
-            alert_area.empty()
-            sms_area.empty()
+                now = datetime.now()
+                st.session_state.saved_time = now.strftime("%I:%M:%S %p")
+                st.session_state.saved_date = now.strftime("%Y-%m-%d")
+                st.session_state.saved_frame = frame
+                st.session_state.is_target_found = True
+                
+                camera.release()
+                st.rerun()
+            else:
+                # أي وجه آخر يظهر باللون الأزرق العادي
+                cv2.rectangle(frame, (x, y), (x+w, y+h), (255, 0, 0), 2)
+                
+        FRAME_WINDOW.image(frame)
+    camera.release()
+
+# 5. شاشة عرض النتيجة النهائية بعد رصد طائرة الدرون للطفل
+if st.session_state.is_target_found:
+    
+    # تشغيل صوت الإنذار المستقر بعد الـ Rerun مباشرة لضمان عدم اختفائه
+    play_alarm_sound("alarm.mp3")
+    
+    # البيانات الجغرافية لموقع طائرة الدرون الحالية
+    geo_name = "المنطقة المركزية - مكة المكرمة"
+    geo_map_url = "https://maps.google.com/?q=21.4225,39.8262"
+    
+    # صيغة رسالة الطوارئ المختصرة والموجهة للواتساب
+    whatsapp_text = f"""🟢 إشعار طوارئ: تم رصد طفلكم المفقود
+👤 الحالة: حصل تطابق (MATCHED)
+📍 الموقع: {geo_name}
+🗺️ رابط الموقع الجغرافي: {geo_map_url}
+⏱️ الوقت: {st.session_state.saved_time} | التاريخ: {st.session_state.saved_date}
+💡 يرجى الضغط على رابط الموقع أعلاه والتوجه فوراً لاستلام الطفل."""
+    
+    st.error("🚨 إنذار: تم رصد وتطابق الطفل المستهدف!")
+    
+    # عرض صندوق الرسالة الأنيق
+    st.markdown(f'<div class="report-box"><b>🟢 الإشعار الجاهز للإرسال (WhatsApp):</b><br>{whatsapp_text}</div>', unsafe_allow_html=True)
+    
+    # تطهير رقم الهاتف تلقائياً من المسافات وعلامات الزائد لضمان توافق الـ API
+    clean_phone = parent_phone.replace(" ", "").replace("+", "")
+    
+    # تشفير وتجهيز الرابط الفعلي للإرسال
+    encoded_message = urllib.parse.quote(whatsapp_text)
+    whatsapp_api_url = f"https://wa.me/{clean_phone}?text={encoded_message}"
+    
+    # زر الإرسال التفاعلي الفعلي
+    st.write("")
+    col_a, col_b, col_c = st.columns([1, 1.5, 1])
+    with col_b:
+        st.markdown(f'<a href="{whatsapp_api_url}" target="_blank"><button style="background-color: #25D366; color: white; border: none; padding: 12px 15px; border-radius: 5px; font-size: 16px; font-weight: bold; cursor: pointer; width: 100%;">🔗 إرسال رسالة لولي الأمر الآن</button></a>', unsafe_allow_html=True)
+    
+    # زر إعادة تصفير النظام وبدء جولة جديدة
+    st.write("")
+    col_b1, col_b2, col_b3 = st.columns([1.2, 1, 1])
+    with col_b2:
+        if st.button("🔄 بدء رصد جديد"):
+            st.session_state.is_target_found = False
+            st.session_state.saved_frame = None
+            st.session_state.saved_time = ""
+            st.session_state.saved_date = ""
+            st.rerun()
 else:
-    st.markdown("<div style='text-align: center; color: #0c5460; background-color: #d1ecf1; padding: 15px; border-radius: 5px;'>🔍 قم بتفعيل الكاميرا لبدء عملية البحث والرصد</div>", unsafe_allow_html=True)
+    if not run_camera:
+        st.markdown("<div style='text-align: center; color: #0c5460; background-color: #d1ecf1; padding: 12px; border-radius: 5px;'>🔍 يرجى تفعيل الكاميرا لبدء عملية المسح والرصد الذكي</div>", unsafe_allow_html=True)
